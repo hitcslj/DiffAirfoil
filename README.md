@@ -1,4 +1,4 @@
-# DiffAirfoil: : Editable and Controllable Airfoil Generation with Diffusion
+# DiffAirfoil:  Editable and Controllable Airfoil Generation with Diffusion
 
 ## Installation
 
