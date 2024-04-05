@@ -82,3 +82,50 @@ class VAE(nn.Module):
         mu, logvar = self.encode(x.reshape(-1, self.feature_size))
         z = self.reparameterize(mu, logvar)
         return self.decode(z), mu, logvar
+
+
+class VQ_VAE(nn.Module):
+    def __init__(self, feature_size=257*2, latent_size=128, num_embeddings=512, embedding_dim=128):
+        super(VQ_VAE, self).__init__()
+        self.latent_size = latent_size
+        self.feature_size = feature_size
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+
+        # encode
+        self.encoder = nn.Sequential(
+            nn.Linear(feature_size, 512),
+            nn.ELU(),
+            nn.Linear(512, latent_size)
+        )
+        
+        # codebook
+        self.codebook = nn.Embedding(num_embeddings, embedding_dim)
+        self.codebook.weight.data.uniform_(-1 / num_embeddings, 1 / num_embeddings)
+
+        # decode
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_size, 512),
+            nn.ELU(),
+            nn.Linear(512, feature_size),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        z = self.encoder(x.view(-1, self.feature_size))  # Get latent representation
+        z_quantized, indices = self.vector_quantization(z)  # Quantize the latent space
+        x_recon = self.decoder(z_quantized)  # Decode the quantized latent space
+        return x_recon, z, z_quantized
+
+    def vector_quantization(self, z):
+        distances = torch.cdist(z, self.codebook.weight, p=2.0)  # Compute distances
+        indices = torch.argmin(distances, dim=1)  # Find nearest neighbors in the codebook
+        z_quantized = self.codebook(indices)  # Quantized latent space
+        return z_quantized, indices
+
+
+if __name__ == '__main__':
+    model = VQ_VAE()
+    x = torch.randn(10, 257*2)
+    x_recon, z, z_quantized = model(x)
+    print(x_recon.shape, z.shape, z_quantized.shape)
