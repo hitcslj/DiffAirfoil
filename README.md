@@ -12,14 +12,14 @@ pip install -r requirements.txt
 
 请将数据集存放在 `data` 文件夹下, 默认数据集为 `data/airfoil/supercritical_airfoil/*.dat`
 
-在项目的dataload文件夹下:
+在项目的跟文件夹下:
 
 ```bash
 # split train/val/test
-python datasplit.py 
+python dataload/datasplit.py 
 
 # generate parsec feature
-python parsec_direct.py 
+python dataload/parsec_direct.py 
 ```
 
 ## Usage

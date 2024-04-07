@@ -10,17 +10,17 @@ train_percent = 0.7
 val_percent = 0.15
 test_percent = 0.15
 
-rootpath = './data/airfoil'
+rootpath = 'data/airfoil'
+dataset_name = 'supercritical_airfoil'
 
 #创建文件
 if not os.path.exists(rootpath):
     os.mkdir(rootpath)
-file_train = open(rootpath+'/train.txt',mode='w')
-file_test = open(rootpath+'/test.txt',mode='w')
-file_val = open(rootpath+'/val.txt',mode='w')
+file_train = open(os.path.join(rootpath,f'{dataset_name}_train.txt'),mode='w')
+file_val = open(os.path.join(rootpath,f'{dataset_name}_val.txt'),mode='w')
+file_test = open(os.path.join(rootpath,f'{dataset_name}_test.txt'),mode='w')
  
- 
-path_alldata = './data/airfoil/supercritical_airfoil'
+path_alldata = os.path.join(rootpath,dataset_name)
 
 file_images_real = np.empty([0, 2])
 # 文件名，xxxxx.txt

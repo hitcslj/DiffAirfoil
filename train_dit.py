@@ -6,7 +6,7 @@ import wandb
 from torch.utils.data import DataLoader
 from torchvision import datasets
 from tqdm import tqdm
-from dataload import AirFoilDatasetParsec
+from dataload import AirFoilMixParsec
 import numpy as np
 from models import script_utils,VAE
 from utils import Fit_airfoil,vis_airfoil2,de_norm
@@ -14,8 +14,8 @@ import os
 
 def get_datasets():
     """获得训练、验证 数据集"""
-    train_dataset = AirFoilDatasetParsec(split='train')
-    val_dataset = AirFoilDatasetParsec(split='val')
+    train_dataset = AirFoilMixParsec(split='train')
+    val_dataset = AirFoilMixParsec(split='val')
     return train_dataset, val_dataset
 
 
