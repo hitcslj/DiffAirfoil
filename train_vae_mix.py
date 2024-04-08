@@ -206,7 +206,7 @@ class Trainer:
         airfoil = model.decode(noise).reshape(sample_num,257,2)
         airfoil = de_norm(airfoil.cpu().numpy())
         os.makedirs('logs/vae_mix',exist_ok=True)
-        vis_airfoil(airfoil[0],epoch,dir_name=args.log_dir)
+        vis_airfoil(airfoil[0],epoch,dir_name='logs/vae_mix')
 
     def main(self,args):
         """Run main training/evaluation pipeline."""

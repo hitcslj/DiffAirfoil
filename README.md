@@ -12,7 +12,7 @@ pip install -r requirements.txt
 
 请将数据集存放在 `data` 文件夹下, 默认数据集为 `data/airfoil/supercritical_airfoil/*.dat`
 
-在项目的跟文件夹下:
+在项目的根文件夹下:
 
 ```bash
 # split train/val/test
