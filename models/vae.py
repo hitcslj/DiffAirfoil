@@ -30,7 +30,7 @@ class BN_Layer(nn.Module):
 
 
 class VAE(nn.Module):
-    def __init__(self, feature_size=257*2, latent_size=128):
+    def __init__(self, feature_size=257, latent_size=128):
         super(VAE, self).__init__()
         self.latent_size = latent_size
         self.feature_size = feature_size
@@ -110,6 +110,14 @@ class VQ_VAE(nn.Module):
             nn.Linear(512, feature_size),
             nn.Sigmoid()
         )
+    
+    def encode(self, x):
+        z = self.encoder(x.view(-1, self.feature_size))  # Get latent representation
+        z_quantized, indices = self.vector_quantization(z)  # Quantize the latent space
+        return z_quantized
+    
+    def decode(self, z):
+        return self.decoder(z)
 
     def forward(self, x):
         z = self.encoder(x.view(-1, self.feature_size))  # Get latent representation

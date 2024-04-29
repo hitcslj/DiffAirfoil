@@ -25,7 +25,7 @@ def parse_option():
     parser.add_argument('--num_workers',type=int,default=4)
     # Training
     parser.add_argument('--start_epoch', type=int, default=1)
-    parser.add_argument('--max_epoch', type=int, default=10000)
+    parser.add_argument('--max_epoch', type=int, default=1000)
     parser.add_argument('--weight_decay', type=float, default=0.0005)
     parser.add_argument("--lr", default=1e-3, type=float)
     parser.add_argument('--lrf', type=float, default=0.01)
@@ -40,10 +40,10 @@ def parse_option():
 
     # io
     parser.add_argument('--checkpoint_path', default='',help='Model checkpoint path') # ./eval_result/logs_p/ckpt_epoch_last.pth
-    parser.add_argument('--log_dir', default='weights/vae_bn_mix',
+    parser.add_argument('--log_dir', default='weights/vae_bn_mix_y',
                         help='Dump dir to save model checkpoint')
-    parser.add_argument('--val_freq', type=int, default=1000)  # epoch-wise
-    parser.add_argument('--save_freq', type=int, default=10000)  # epoch-wise
+    parser.add_argument('--val_freq', type=int, default=100)  # epoch-wise
+    parser.add_argument('--save_freq', type=int, default=500)  # epoch-wise
     
 
     # 评测指标相关
@@ -78,13 +78,13 @@ def load_checkpoint(args, model, optimizer, scheduler):
 
 # Reconstruction + KL divergence losses summed over all elements and batch
 def loss_function(recon_x, x, mu, logvar):
-    recons = nn.MSELoss()(recon_x, x.view(-1, 257*2))
+    recons = nn.MSELoss()(recon_x, x)
     # see Appendix B from VAE paper:
     # Kingma and Welling. Auto-Encoding Variational Bayes. ICLR, 2014
     # https://arxiv.org/abs/1312.6114
     # 0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
     KLD = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-    return recons + KLD
+    return 10*recons + KLD
 
 # BRIEF save model.
 def save_checkpoint(args, epoch, model, optimizer, scheduler, save_cur=False):
@@ -131,7 +131,7 @@ class Trainer:
 
     @staticmethod
     def get_model(args):
-        model = VAE(257*2,args.latent_size)
+        model = VAE()
         return model
 
     @staticmethod
@@ -149,6 +149,8 @@ class Trainer:
         model.train()  # set model to training mode
         for _,data in enumerate(tqdm(dataloader)):
             gt = data['gt'] # [b,257,2]
+            # 只取y坐标
+            gt = gt[:,:,1] # [b,257]
             gt = gt.to(device)
             optimizer.zero_grad()
 
@@ -177,19 +179,20 @@ class Trainer:
         test_loader = tqdm(dataloader)
         for _,data in enumerate(test_loader):
             gt = data['gt'] # [b,257,2]
+            gt = gt[:,:,1] # [b,257]
             gt = gt.to(device)
-            # # AE
-            recon_batch, mu, logvar = model(gt) # [b,257,2],[b,37,2]
 
+            # # AE
+            recon_batch, mu, logvar = model(gt) 
             total_pred += gt.shape[0]
             loss = loss_function(recon_batch, gt, mu, logvar)
             total_loss += loss.item()
-            distances = torch.norm(de_norm(gt.cpu()) - de_norm(recon_batch.reshape(-1,257,2).cpu()),dim=2) #(B,257)
+            distances = torch.norm(de_norm(gt.cpu(),dim=1) - de_norm(recon_batch.cpu(),dim=1),dim=-1) #(B,257)
             # 点的直线距离小于t，说明预测值和真实值比较接近，认为该预测值预测正确
             t = args.distance_threshold
             # 200个点中，预测正确的点的比例超过ratio，认为该形状预测正确
             ratio = args.threshold_ratio
-            count = (distances < t).sum(1) #(B) 一个样本中预测坐标和真实坐标距离小于t的点的个数
+            count = (distances < t).sum(0) #(B) 一个样本中预测坐标和真实坐标距离小于t的点的个数
             correct_count = (count >= ratio*200).sum().item() # batch_size数量的样本中，正确预测样本的个数
             correct_pred += correct_count
             
@@ -199,14 +202,17 @@ class Trainer:
         print(f"eval——epoch: {epoch}, accuracy: {accuracy}, avg_loss: {avg_loss}")
 
     @torch.no_grad()
-    def infer(self, model,device,epoch,args):
+    def infer(self, model, dataloader,device,epoch,args):
         model.eval()
-        sample_num = 1
-        noise = torch.randn((sample_num,args.latent_size)).to(device) # [B,128] -> [B,64]-> [B,1,64] -> [B,1,8,8]  h=w=sqrt(T),patch_size = 1, 
-        airfoil = model.decode(noise).reshape(sample_num,257,2)
-        airfoil = de_norm(airfoil.cpu().numpy())
-        os.makedirs('logs/vae_mix',exist_ok=True)
-        vis_airfoil(airfoil[0],epoch,dir_name='logs/vae_mix')
+        for _,data in enumerate(dataloader):
+            gt = data['gt'] # [b,257,2]
+            x = gt[0,:,0] # [257]
+            noise = torch.randn((1,args.latent_size)).to(device) # [1,128]
+            y = model.decode(noise)[0].cpu().numpy() # [257,2]
+            airfoil = np.stack([x,y],axis=1)
+            airfoil = de_norm(airfoil)
+            vis_airfoil(airfoil,epoch,dir_name='logs/vae_mix_y')
+            return 
 
     def main(self,args):
         """Run main training/evaluation pipeline."""
@@ -249,6 +255,7 @@ class Trainer:
                     epoch=epoch, 
                     args=args)
                 self.infer(model=model,
+                           dataloader=val_loader,
                            device=device,
                            epoch=epoch, 
                            args=args)

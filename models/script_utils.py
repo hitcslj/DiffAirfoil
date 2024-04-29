@@ -79,14 +79,14 @@ def get_diffusion_from_args(args):
         )
     if args.project_name == 'airfoil-dit':
         model = PointDiT(
-            latent_size = 128,
+            latent_size = 257,
             input_channels = 1,
             hidden_size=256,
             condition_size1=11,
-            condition_size2=52,
+            condition_size2=26,
             )
         diffusion = PointDiTDiffusion(
-            model, latent_size=128, channels=1,
+            model, latent_size=257, channels=1,
             betas=betas,
             ema_decay=args.ema_decay,
             ema_update_rate=args.ema_update_rate,

@@ -8,7 +8,7 @@ from torchvision import datasets
 from tqdm import tqdm
 from dataload import AirFoilMixParsec
 import numpy as np
-from models import script_utils,VAE
+from models import script_utils,VQ_VAE
 from utils import Fit_airfoil,vis_airfoil2,de_norm
 import os
 
@@ -28,6 +28,12 @@ def main():
         diffusion = script_utils.get_diffusion_from_args(args).to(device)
         optimizer = torch.optim.Adam(diffusion.parameters(), lr=args.learning_rate)
         os.makedirs(args.log_dir, exist_ok=True)
+        # load vae model weights
+        vae = VQ_VAE()
+        checkpoint = torch.load('weights/vqvae_mix/ckpt_epoch_10000.pth', map_location='cpu')
+        vae.load_state_dict(checkpoint['model'])
+        vae = vae.to(device)
+        vae.eval()
 
         if args.model_checkpoint is not None:
             diffusion.load_state_dict(torch.load(args.model_checkpoint))
@@ -63,14 +69,20 @@ def main():
 
             data = next(train_loader)  
            
-            gt = data['gt'][:,:,1:2] # (128, 257, 2)
+            x = data['gt'] # (128, 257, 2)
             y = data['params'] # (128, 11)
-            y2 = data['keypoint'][:,:,1] # (128, 26)
-            gt = gt.to(device)  
-            y = y.to(device) 
+            y2 = data['keypoint'] # (128, 26, 2)
+            y2 = y2.reshape(-1, 52)
+
+            x = x.to(device) # (128, 257, 2)
+            y = y.to(device) # (128, 11)
             y2 = y2.to(device)
- 
-            loss = diffusion(gt, y, y2)
+            
+
+            with torch.no_grad():
+              x = vae.encode(x) # (b, 128)
+            x = x.unsqueeze(-1) # (b, 128, 1)
+            loss = diffusion(x, y, y2)
             acc_train_loss = loss.item()
 
             optimizer.zero_grad()
@@ -79,28 +91,27 @@ def main():
 
             diffusion.update_ema()
             print(f"iteration: {iteration}, train_loss: {acc_train_loss}")
-            args.log_rate = 1
+
             if iteration % args.log_rate == 0:
               with torch.no_grad():
                 diffusion.eval()
                 for i,data in enumerate(tqdm(test_loader)):
-                  x = data['gt'][0,:,0] # (257,)
-                  gt = data['gt'][:,:,1:2] # (128, 257, 2)
-                  y = data['params'] # (128, 11)
-                  y2 = data['keypoint'][:,:,1] # (128, 26)
-                  gt = gt.to(device)  
-                  y = y.to(device) 
-                  y2 = y2.to(device)
+                  x = data['gt'] # (1, 257, 2)
+                  y = data['params'] # (1, 11)
+                  y2 = data['keypoint'] # (1, 26, 2)
+                  y2 = y2.reshape(-1, 26*2)
+                    
+                  x = x.to(device) # (128, 257, 2)
+                  y = y.to(device) # (128, 11)
+                  y2 = y2.to(device) # (128, 52)
                   samples = diffusion.sample_ddim(batch_size=1, device=device, y=y, y2=y2).to(device)
-                  samples = samples[0,:,0].cpu().numpy()
-                  samples = np.stack([x,samples],axis=1)
-                  samples = de_norm(samples)
-                  # samples = de_norm(samples.reshape(1,257,2))
+                  with torch.no_grad():
+                      samples = vae.decode(samples.squeeze(-1)).cpu().numpy()
+                  samples = de_norm(samples.reshape(1,257,2))
                   # samples = samples.permute(0, 2, 1).cpu().numpy()
                   # 对samples 进行可视化
-                  source = de_norm(data['gt'][0].cpu().numpy())
-
-                  vis_airfoil2(source,samples,f'{iteration}_{i}',dir_name=args.log_dir,sample_type='ddim')
+                  source = de_norm(x[0].cpu().numpy())
+                  vis_airfoil2(source,samples[0],f'{iteration}_{i}',dir_name=args.log_dir,sample_type='ddim')
 
             if iteration % args.checkpoint_rate == 0:
                 model_filename = f"{args.log_dir}/model-airfoil-{iteration}.pth"

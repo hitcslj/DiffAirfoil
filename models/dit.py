@@ -147,11 +147,11 @@ class PointDiT(nn.Module):
     """
     def __init__(
         self,
-        latent_size = 128,
+        latent_size = 257,
         input_channels = 1,
         hidden_size=256,
         condition_size1=11,
-        condition_size2=52,
+        condition_size2=26,
         depth=4,
         num_heads=16,
         mlp_ratio=4.0,
@@ -172,6 +172,7 @@ class PointDiT(nn.Module):
         self.blocks = nn.ModuleList([
             DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio) for _ in range(depth)
         ])
+        # self.ssm =  here can use the SSM
         self.final_layer = FinalLayer(hidden_size, input_channels)
         self.initialize_weights()
 
@@ -223,7 +224,7 @@ class PointDiT(nn.Module):
         t = self.t_embedder(t)                   # (N, D)
         y = self.y_embedder(y)    # (N, D)
         y2 = self.y2_embedder(y2)
-        c = t + y + y2                              # (N, D)
+        c = t + y + y2                              # (N, T, D)
         for block in self.blocks:
             x = block(x, c)                      # (N, T, D)
         x = self.final_layer(x, c)                # (N, T, 1)

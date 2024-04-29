@@ -5,12 +5,13 @@ import torch.nn as nn
 from tqdm import tqdm 
 from torch.utils.data import DataLoader
 import torch.optim as optim 
+from torch.nn import functional as F
 import torch.optim.lr_scheduler as lr_scheduler
-from dataload import AirFoilDatasetParsec 
+from dataload import AirFoilMixParsec 
 import math 
 import numpy as np
-from utils import vis_airfoil,de_norm
-from models import VAE
+from utils import vis_airfoil,de_norm,vis_airfoil2
+from models import VQ_VAE
 
 
 
@@ -39,8 +40,8 @@ def parse_option():
     parser.add_argument('--warmup-multiplier', type=int, default=100)
 
     # io
-    parser.add_argument('--checkpoint_path', default='',help='Model checkpoint path') # ./eval_result/logs_p/ckpt_epoch_last.pth
-    parser.add_argument('--log_dir', default='weights/vae_bn',
+    parser.add_argument('--checkpoint_path', default='weights/vqvae_mix/ckpt_epoch_10000.pth',help='Model checkpoint path') # 
+    parser.add_argument('--log_dir', default='weights/vqvae_mix',
                         help='Dump dir to save model checkpoint')
     parser.add_argument('--val_freq', type=int, default=1000)  # epoch-wise
     parser.add_argument('--save_freq', type=int, default=10000)  # epoch-wise
@@ -76,15 +77,6 @@ def load_checkpoint(args, model, optimizer, scheduler):
     del checkpoint
     torch.cuda.empty_cache()
 
-# Reconstruction + KL divergence losses summed over all elements and batch
-def loss_function(recon_x, x, mu, logvar):
-    recons = nn.MSELoss()(recon_x, x.view(-1, 257))
-    # see Appendix B from VAE paper:
-    # Kingma and Welling. Auto-Encoding Variational Bayes. ICLR, 2014
-    # https://arxiv.org/abs/1312.6114
-    # 0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
-    KLD = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-    return recons + KLD
 
 # BRIEF save model.
 def save_checkpoint(args, epoch, model, optimizer, scheduler, save_cur=False):
@@ -111,8 +103,8 @@ class Trainer:
     
     def get_datasets(self):
         """获得训练、验证 数据集"""
-        train_dataset = AirFoilDatasetParsec(split='train')
-        val_dataset = AirFoilDatasetParsec(split='val')
+        train_dataset = AirFoilMixParsec(split='train')
+        val_dataset = AirFoilMixParsec(split='val')
         return train_dataset, val_dataset
     
     def get_loaders(self,args):
@@ -131,7 +123,7 @@ class Trainer:
 
     @staticmethod
     def get_model(args):
-        model = VAE(257*2,args.latent_size)
+        model = VQ_VAE(latent_size=args.latent_size)
         return model
 
     @staticmethod
@@ -152,17 +144,23 @@ class Trainer:
             gt = gt.to(device)
             optimizer.zero_grad()
 
-            # # AE
-            recon_batch, mu, logvar = model(gt) # [b,257,2]
+            # # VQ-VAE
+            recon_batch, z, z_quantized = model(gt) # [b,257,2],[b,37,2]
 
-            loss = loss_function(recon_batch, gt, mu, logvar)
+            # Reconstruction loss
+            loss_recons = F.mse_loss(recon_batch, gt.view(-1, 257*2))
+            # Vector quantization objective
+            loss_vq = F.mse_loss(z_quantized, z.detach())
+            # Commitment objective
+            loss_commit = F.mse_loss(z, z_quantized.detach())
+
+            loss = loss_recons + loss_vq +  loss_commit
             # 反向传播
             loss.backward()
             # 参数更新
             optimizer.step()            
-        # 打印loss
-        print('====> Epoch: {} Average loss: {:.8f}'.format(
-          epoch, loss.item()))
+        # 打印loss, loss_recons, loss_vq, loss_commit
+        print(f"train——epoch: {epoch}, loss: {loss}, loss_recons: {loss_recons}, loss_vq: {loss_vq}, loss_commit: {loss_commit}")
 
 
     @torch.no_grad()
@@ -179,10 +177,11 @@ class Trainer:
             gt = data['gt'] # [b,257,2]
             gt = gt.to(device)
             # # AE
-            recon_batch, mu, logvar = model(gt) # [b,257,2],[b,37,2]
+            recon_batch, z, z_quantized = model(gt) # [b,257,2],[b,37,2]
 
             total_pred += gt.shape[0]
-            loss = loss_function(recon_batch, gt, mu, logvar)
+            loss = F.mse_loss(recon_batch, gt.view(-1, 257*2))
+            
             total_loss += loss.item()
             distances = torch.norm(de_norm(gt.cpu()) - de_norm(recon_batch.reshape(-1,257,2).cpu()),dim=2) #(B,257)
             # 点的直线距离小于t，说明预测值和真实值比较接近，认为该预测值预测正确
@@ -199,14 +198,16 @@ class Trainer:
         print(f"eval——epoch: {epoch}, accuracy: {accuracy}, avg_loss: {avg_loss}")
 
     @torch.no_grad()
-    def infer(self, model,device,epoch,args):
+    def infer(self, model, dataloader,device, epoch, args):
         model.eval()
-        sample_num = 1
-        noise = torch.randn((sample_num,args.latent_size)).to(device) # [B,128] -> [B,64]-> [B,1,64] -> [B,1,8,8]  h=w=sqrt(T),patch_size = 1, 
-        airfoil = model.decode(noise).reshape(sample_num,257,2)
-        airfoil = de_norm(airfoil.cpu().numpy())
-        os.makedirs('logs/cvae',exist_ok=True)
-        vis_airfoil(airfoil[0],epoch,dir_name=args.log_dir)
+        test_loader = tqdm(dataloader)
+        for _,data in enumerate(test_loader): # 只需要可视化张图片
+            gt = data['gt'] # [b,257,2]
+            gt = gt.to(device)
+            recon_batch, z, z_quantized = model(gt) # [b,257,2],[b,37,2]
+            for j in range(recon_batch.shape[0]):
+              vis_airfoil2(de_norm(gt.cpu().numpy())[j],de_norm(recon_batch.reshape(-1,257,2).cpu().numpy())[j],epoch+j,dir_name='logs/vqvae',sample_type='vqvae_mix')
+            return 
 
     def main(self,args):
         """Run main training/evaluation pipeline."""
@@ -230,29 +231,30 @@ class Trainer:
             
         for epoch in range(args.start_epoch,args.max_epoch+1):
             # train
-            self.train_one_epoch(model=model,
-                                 optimizer=optimizer,
-                                 dataloader=train_loader,
-                                 device=device,
-                                 epoch=epoch
-                                 )
-            scheduler.step()
+            # self.train_one_epoch(model=model,
+            #                      optimizer=optimizer,
+            #                      dataloader=train_loader,
+            #                      device=device,
+            #                      epoch=epoch
+            #                      )
+            # scheduler.step()
             # save model and validate
-            # args.val_freq = 1
+            args.val_freq = 1
             if epoch % args.val_freq == 0:
-                save_checkpoint(args, epoch, model, optimizer, scheduler)
+                # save_checkpoint(args, epoch, model, optimizer, scheduler)
                 print("Validation begin.......")
-                self.evaluate_one_epoch(
-                    model=model,
-                    dataloader=val_loader,
-                    device=device, 
-                    epoch=epoch, 
-                    args=args)
+                # self.evaluate_one_epoch(
+                #     model=model,
+                #     dataloader=val_loader,
+                #     device=device, 
+                #     epoch=epoch, 
+                #     args=args)
                 self.infer(model=model,
+                           dataloader=val_loader,
                            device=device,
                            epoch=epoch, 
                            args=args)
-                # return
+                return
           
                 
 
