@@ -38,9 +38,9 @@ python train_dit.py
 
 ## Resources
 
-I have developed a baseline for editing airfoils using VAE. You can find the code [here]((https://github.com/hitcslj/Airfoil)).
+I have developed a baseline for editing airfoils using VAE. You can find the code [here](https://github.com/hitcslj/Airfoil).
 
-I have implemented a script using XFoil to calculate the aerodynamic performance of airfoils, which can be used in Linux. The code is available [here]((https://github.com/hitcslj/Xfoil-cal)).
+I have implemented a script using XFoil to calculate the aerodynamic performance of airfoils, which can be used in Linux. The code is available [here](https://github.com/hitcslj/Xfoil-cal).
 
 I have created a demo for editing airfoils using Gradio. You can access the demo [here](https://github.com/hitcslj/airfoil-demo).
 
