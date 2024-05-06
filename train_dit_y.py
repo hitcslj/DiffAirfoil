@@ -16,8 +16,8 @@ import os
 
 def get_datasets():
     """获得训练、验证 数据集"""
-    train_dataset = AirFoilMixParsec(split='train')
-    val_dataset = AirFoilMixParsec(split='val')
+    train_dataset = AirFoilDatasetParsec(split='train')
+    val_dataset = AirFoilDatasetParsec(split='val')
     return train_dataset, val_dataset
 
 

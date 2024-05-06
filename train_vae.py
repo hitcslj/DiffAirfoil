@@ -9,41 +9,35 @@ import torch.optim.lr_scheduler as lr_scheduler
 from dataload import AirFoilDatasetParsec 
 import math 
 import numpy as np
-from utils import vis_airfoil,de_norm
+from utils import vis_airfoil
 from models import VAE
-
 
 
 def parse_option():
     """Parse cmd arguments."""
     parser = argparse.ArgumentParser()
     # Data
-    parser.add_argument('--batch_size', type=int, default=64,
+    parser.add_argument('--feature_size', type=int, default=257)
+    parser.add_argument('--batch_size', type=int, default=256,
                         help='Batch Size during training')
-    parser.add_argument('--latent_size', type=int, default=128,
+    parser.add_argument('--latent_size', type=int, default=32,
                         help='Batch Size during training')
-    parser.add_argument('--num_workers',type=int,default=4)
+    parser.add_argument('--num_workers',type=int,default=8)
     # Training
     parser.add_argument('--start_epoch', type=int, default=1)
-    parser.add_argument('--max_epoch', type=int, default=10000)
+    parser.add_argument('--max_epoch', type=int, default=30000)
     parser.add_argument('--weight_decay', type=float, default=0.0005)
     parser.add_argument("--lr", default=1e-3, type=float)
     parser.add_argument('--lrf', type=float, default=0.01)
     parser.add_argument('--lr-scheduler', type=str, default='step',
                           choices=["step", "cosine"])
-    parser.add_argument('--lr_decay_epochs', type=int, default=[50, 75],
-                        nargs='+', help='when to decay lr, can be a list')
-    parser.add_argument('--lr_decay_rate', type=float, default=0.1,
-                        help='for step scheduler. decay rate for lr')
-    parser.add_argument('--warmup-epoch', type=int, default=-1)
-    parser.add_argument('--warmup-multiplier', type=int, default=100)
 
     # io
     parser.add_argument('--checkpoint_path', default='',help='Model checkpoint path') # ./eval_result/logs_p/ckpt_epoch_last.pth
-    parser.add_argument('--log_dir', default='weights/vae_bn',
+    parser.add_argument('--log_dir', default='weights/vae',
                         help='Dump dir to save model checkpoint')
     parser.add_argument('--val_freq', type=int, default=1000)  # epoch-wise
-    parser.add_argument('--save_freq', type=int, default=10000)  # epoch-wise
+    parser.add_argument('--save_freq', type=int, default=5000)  # epoch-wise
     
 
     # 评测指标相关
@@ -51,7 +45,6 @@ def parse_option():
     parser.add_argument('--threshold_ratio', type=float, default=0.75) # 200个点中，预测正确的点超过一定的比例，被认为是预测正确的样本
    
     args, _ = parser.parse_known_args()
-
 
     return args
 
@@ -78,11 +71,10 @@ def load_checkpoint(args, model, optimizer, scheduler):
 
 # Reconstruction + KL divergence losses summed over all elements and batch
 def loss_function(recon_x, x, mu, logvar):
-    recons = nn.MSELoss()(recon_x, x.view(-1, 257*2))
+    recons = nn.MSELoss(reduction='sum')(recon_x, x)
     # see Appendix B from VAE paper:
     # Kingma and Welling. Auto-Encoding Variational Bayes. ICLR, 2014
     # https://arxiv.org/abs/1312.6114
-    # 0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
     KLD = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
     return recons + KLD
 
@@ -113,6 +105,7 @@ class Trainer:
         """获得训练、验证 数据集"""
         train_dataset = AirFoilDatasetParsec(split='train')
         val_dataset = AirFoilDatasetParsec(split='val')
+        self.val_dataset = val_dataset
         return train_dataset, val_dataset
     
     def get_loaders(self,args):
@@ -131,11 +124,11 @@ class Trainer:
 
     @staticmethod
     def get_model(args):
-        model = VAE(257*2,args.latent_size)
+        model = VAE(args.feature_size, args.latent_size)
         return model
 
     @staticmethod
-    def get_optimizer(args,model):
+    def get_optimizer(args, model):
         params = [p for p in model.parameters() if p.requires_grad]
         optimizer = optim.AdamW(params,
                               lr = args.lr,
@@ -148,15 +141,14 @@ class Trainer:
         """训练一个epoch"""
         model.train()  # set model to training mode
         for _,data in enumerate(tqdm(dataloader)):
-            gt = data['gt'] # [b,257,2]
+            gt = data['gt'][:, :, 1] # [b,257,1]
             gt = gt.to(device)
-            optimizer.zero_grad()
-
             # # AE
-            recon_batch, mu, logvar = model(gt) # [b,257,2]
-
+            recon_batch, mu, logvar = model(gt) # [b,257,1]
+            recon_batch = recon_batch.reshape(gt.shape[0], -1)
             loss = loss_function(recon_batch, gt, mu, logvar)
             # 反向传播
+            optimizer.zero_grad()
             loss.backward()
             # 参数更新
             optimizer.step()            
@@ -176,21 +168,21 @@ class Trainer:
 
         test_loader = tqdm(dataloader)
         for _,data in enumerate(test_loader):
-            gt = data['gt'] # [b,257,2]
+            gt = data['gt'][:,:,1] # [b,257]
             gt = gt.to(device)
-            # # AE
-            recon_batch, mu, logvar = model(gt) # [b,257,2],[b,37,2]
-
+            # AE
+            recon_batch, mu, logvar = model(gt) # [b,257]
+            recon_batch = recon_batch.reshape(gt.shape[0], -1)
             total_pred += gt.shape[0]
             loss = loss_function(recon_batch, gt, mu, logvar)
             total_loss += loss.item()
-            distances = torch.norm(de_norm(gt.cpu()) - de_norm(recon_batch.reshape(-1,257,2).cpu()),dim=2) #(B,257)
+            distances = gt.cpu() - recon_batch.cpu() #(B,257)
             # 点的直线距离小于t，说明预测值和真实值比较接近，认为该预测值预测正确
             t = args.distance_threshold
             # 200个点中，预测正确的点的比例超过ratio，认为该形状预测正确
             ratio = args.threshold_ratio
-            count = (distances < t).sum(1) #(B) 一个样本中预测坐标和真实坐标距离小于t的点的个数
-            correct_count = (count >= ratio*200).sum().item() # batch_size数量的样本中，正确预测样本的个数
+            count = (distances < t).sum(dim=1) #(B) 一个样本中预测坐标和真实坐标距离小于t的点的个数
+            correct_count = (count >= ratio*257).sum().item() # batch_size数量的样本中，正确预测样本的个数
             correct_pred += correct_count
             
         accuracy = correct_pred / total_pred
@@ -203,14 +195,14 @@ class Trainer:
         model.eval()
         sample_num = 1
         noise = torch.randn((sample_num,args.latent_size)).to(device) # [B,128] -> [B,64]-> [B,1,64] -> [B,1,8,8]  h=w=sqrt(T),patch_size = 1, 
-        airfoil = model.decode(noise).reshape(sample_num,257,2)
-        airfoil = de_norm(airfoil.cpu().numpy())
+        airfoil = model.decode(noise).reshape(sample_num,args.feature_size)
+        airfoil = airfoil.cpu().numpy()
+        gt_x = self.val_dataset.__getitem__(0)['gt'][:,0:1].cpu().numpy()
         os.makedirs('logs/cvae',exist_ok=True)
-        vis_airfoil(airfoil[0],epoch,dir_name=args.log_dir)
+        vis_airfoil(np.concatenate((gt_x, np.expand_dims(airfoil[0], -1)),axis=-1),epoch,dir_name=args.log_dir)
 
     def main(self,args):
         """Run main training/evaluation pipeline."""
-        
         # 单卡训练
         model = self.get_model(args)
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -252,9 +244,6 @@ class Trainer:
                            device=device,
                            epoch=epoch, 
                            args=args)
-                # return
-          
-                
 
 if __name__ == '__main__':
     opt = parse_option()
