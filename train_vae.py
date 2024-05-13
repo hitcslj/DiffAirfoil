@@ -9,7 +9,7 @@ import torch.optim.lr_scheduler as lr_scheduler
 from dataload import AirFoilDatasetParsec 
 import math 
 import numpy as np
-from utils import vis_airfoil
+from utils import vis_airfoil, vis_airfoils, visualize_latent_space
 from models import VAE
 
 
@@ -18,14 +18,14 @@ def parse_option():
     parser = argparse.ArgumentParser()
     # Data
     parser.add_argument('--feature_size', type=int, default=257)
-    parser.add_argument('--batch_size', type=int, default=256,
+    parser.add_argument('--batch_size', type=int, default=512,
                         help='Batch Size during training')
     parser.add_argument('--latent_size', type=int, default=32,
                         help='Batch Size during training')
     parser.add_argument('--num_workers',type=int,default=8)
     # Training
     parser.add_argument('--start_epoch', type=int, default=1)
-    parser.add_argument('--max_epoch', type=int, default=30000)
+    parser.add_argument('--max_epoch', type=int, default=5000)
     parser.add_argument('--weight_decay', type=float, default=0.0005)
     parser.add_argument("--lr", default=1e-3, type=float)
     parser.add_argument('--lrf', type=float, default=0.01)
@@ -34,10 +34,10 @@ def parse_option():
 
     # io
     parser.add_argument('--checkpoint_path', default='',help='Model checkpoint path') # ./eval_result/logs_p/ckpt_epoch_last.pth
-    parser.add_argument('--log_dir', default='weights/vae',
+    parser.add_argument('--log_dir', default='new_weights/vae',
                         help='Dump dir to save model checkpoint')
-    parser.add_argument('--val_freq', type=int, default=1000)  # epoch-wise
-    parser.add_argument('--save_freq', type=int, default=5000)  # epoch-wise
+    parser.add_argument('--val_freq', type=int, default=200)  # epoch-wise
+    parser.add_argument('--save_freq', type=int, default=200)  # epoch-wise
     
 
     # 评测指标相关
@@ -70,13 +70,13 @@ def load_checkpoint(args, model, optimizer, scheduler):
     torch.cuda.empty_cache()
 
 # Reconstruction + KL divergence losses summed over all elements and batch
-def loss_function(recon_x, x, mu, logvar):
+def loss_function(recon_x, x, mu, logvar,beta=1.0):
     recons = nn.MSELoss(reduction='sum')(recon_x, x)
     # see Appendix B from VAE paper:
     # Kingma and Welling. Auto-Encoding Variational Bayes. ICLR, 2014
     # https://arxiv.org/abs/1312.6114
     KLD = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-    return recons + KLD
+    return recons + beta * KLD
 
 # BRIEF save model.
 def save_checkpoint(args, epoch, model, optimizer, scheduler, save_cur=False):
@@ -103,9 +103,11 @@ class Trainer:
     
     def get_datasets(self):
         """获得训练、验证 数据集"""
-        train_dataset = AirFoilDatasetParsec(split='train')
-        val_dataset = AirFoilDatasetParsec(split='val')
+        train_dataset = AirFoilDatasetParsec(split='train', dataset_names=['cst_gen', 'supercritical_airfoil', 'interpolated_uiuc'])
+        val_dataset = AirFoilDatasetParsec(split='test', dataset_names=['cst_gen', 'supercritical_airfoil', 'interpolated_uiuc'])
         self.val_dataset = val_dataset
+        print(f"Num of Train: {len(train_dataset)}")
+        print(f"Num of Val: {len(val_dataset)}")
         return train_dataset, val_dataset
     
     def get_loaders(self,args):
@@ -120,6 +122,7 @@ class Trainer:
                                   shuffle=False,
                                   batch_size=args.batch_size,
                                   num_workers=args.num_workers)
+        self.val_loader = val_loader
         return train_loader,val_loader
 
     @staticmethod
@@ -137,7 +140,7 @@ class Trainer:
     
 
 
-    def train_one_epoch(self,model,optimizer,dataloader,device,epoch):
+    def train_one_epoch(self,model,optimizer,dataloader,device,epoch,beta):
         """训练一个epoch"""
         model.train()  # set model to training mode
         for _,data in enumerate(tqdm(dataloader)):
@@ -146,7 +149,7 @@ class Trainer:
             # # AE
             recon_batch, mu, logvar = model(gt) # [b,257,1]
             recon_batch = recon_batch.reshape(gt.shape[0], -1)
-            loss = loss_function(recon_batch, gt, mu, logvar)
+            loss = loss_function(recon_batch, gt, mu, logvar, beta=beta)
             # 反向传播
             optimizer.zero_grad()
             loss.backward()
@@ -193,13 +196,21 @@ class Trainer:
     @torch.no_grad()
     def infer(self, model,device,epoch,args):
         model.eval()
-        sample_num = 1
-        noise = torch.randn((sample_num,args.latent_size)).to(device) # [B,128] -> [B,64]-> [B,1,64] -> [B,1,8,8]  h=w=sqrt(T),patch_size = 1, 
+        sample_num = 32
+        real_airfoils = [self.val_dataset.__getitem__(i)['gt'][:,1] for i in range(sample_num)]
+        real_airfoils_tensor = torch.stack(real_airfoils).to(device)
+        recon_airfoils,_,_ = model(real_airfoils_tensor)
+        recon_airfoils = recon_airfoils.reshape(sample_num, -1).cpu().numpy()
+
+        noise = torch.randn((sample_num,args.latent_size)).to(device) 
         airfoil = model.decode(noise).reshape(sample_num,args.feature_size)
         airfoil = airfoil.cpu().numpy()
         gt_x = self.val_dataset.__getitem__(0)['gt'][:,0:1].cpu().numpy()
         os.makedirs('logs/cvae',exist_ok=True)
-        vis_airfoil(np.concatenate((gt_x, np.expand_dims(airfoil[0], -1)),axis=-1),epoch,dir_name=args.log_dir)
+        vis_airfoils(gt_x, np.expand_dims(real_airfoils_tensor.cpu().numpy(), -1),f"{epoch}_Real",dir_name=args.log_dir,title="Real Airfoils")
+        vis_airfoils(gt_x, np.expand_dims(recon_airfoils, -1),f"{epoch}_Reconstructed",dir_name=args.log_dir,title="Reconstructed Airfoils")
+        vis_airfoils(gt_x, np.expand_dims(airfoil, -1),f"{epoch}_Synthesized",dir_name=args.log_dir,title="Synthesized Airfoils")
+        visualize_latent_space(model, self.val_loader, device, f"{epoch}_Latent",dir_name=args.log_dir)
 
     def main(self,args):
         """Run main training/evaluation pipeline."""
@@ -214,19 +225,22 @@ class Trainer:
         lf = lambda x: ((1 + math.cos(x * math.pi / args.max_epoch)) / 2) * (1 - args.lrf) + args.lrf  # cosine
         scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
       
- 
         # Check for a checkpoint
         if len(args.checkpoint_path)>0:
             assert os.path.isfile(args.checkpoint_path)
             load_checkpoint(args, model, optimizer, scheduler)
-            
-        for epoch in range(args.start_epoch,args.max_epoch+1):
+        beta_start = 0.0
+        beta_end = 0.0005
+        beta_increment = (beta_end - beta_start) / args.max_epoch
+        for epoch in tqdm(range(args.start_epoch,args.max_epoch+1)):
+            current_beta = beta_start + beta_increment * epoch
             # train
             self.train_one_epoch(model=model,
                                  optimizer=optimizer,
                                  dataloader=train_loader,
                                  device=device,
-                                 epoch=epoch
+                                 epoch=epoch,
+                                 beta=current_beta
                                  )
             scheduler.step()
             # save model and validate

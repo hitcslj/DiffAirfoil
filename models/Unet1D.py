@@ -1,28 +1,26 @@
-import sys
-sys.path.append('./')
 import math
-from inspect import isfunction
+from pathlib import Path
+from random import random
 from functools import partial
+from collections import namedtuple
+from multiprocessing import cpu_count
 
-# %matplotlib inline
-from matplotlib import pyplot as plt
-from tqdm.auto import tqdm
-from einops import rearrange, reduce, repeat
+import torch
+from torch import nn, einsum, Tensor
+import torch.nn.functional as F
+from torch.cuda.amp import autocast
+from torch.optim import Adam
+from torch.utils.data import Dataset, DataLoader
+
+from einops import rearrange, reduce
 from einops.layers.torch import Rearrange
 
-from pathlib import Path
-from torch.utils.data import Dataset
-import torch
-from torch import nn, einsum
-import torch.nn.functional as F
-from .attend import Attend
-from torch.utils.data import DataLoader
-from torch.autograd import Variable
-import numpy as np
-import os
-os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-BATCHSIZE = 64
+from accelerate import Accelerator
+from ema_pytorch import EMA
+
+from tqdm.auto import tqdm
+
+# helpers functions
 
 def exists(x):
     return x is not None
@@ -32,37 +30,6 @@ def default(val, d):
         return val
     return d() if callable(d) else d
 
-def identity(t, *args, **kwargs):
-    return t
-
-def cycle(dl):
-    while True:
-        for data in dl:
-            yield data
-
-def has_int_squareroot(num):
-    return (math.sqrt(num) ** 2) == num
-
-def num_to_groups(num, divisor):
-    groups = num // divisor
-    remainder = num % divisor
-    arr = [divisor] * groups
-    if remainder > 0:
-        arr.append(remainder)
-    return arr
-
-def convert_image_to_fn(img_type, image):
-    if image.mode != img_type:
-        return image.convert(img_type)
-    return image
-
-# normalization functions
-
-def normalize_to_neg_one_to_one(img):
-    return img * 2 - 1
-
-def unnormalize_to_zero_to_one(t):
-    return (t + 1) * 0.5
 
 class Residual(nn.Module):
     def __init__(self, fn):
@@ -100,7 +67,6 @@ class PreNorm(nn.Module):
         return self.fn(x)
 
 # sinusoidal positional embeds
-
 class SinusoidalPosEmb(nn.Module):
     def __init__(self, dim, theta = 10000):
         super().__init__()
@@ -115,21 +81,6 @@ class SinusoidalPosEmb(nn.Module):
         emb = x[:, None] * emb[None, :]
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         return emb
-
-class RandomOrLearnedSinusoidalPosEmb(nn.Module):
-
-    def __init__(self, dim, is_random = False):
-        super().__init__()
-        assert (dim % 2) == 0
-        half_dim = dim // 2
-        self.weights = nn.Parameter(torch.randn(half_dim), requires_grad = not is_random)
-
-    def forward(self, x):
-        x = rearrange(x, 'b -> b 1')
-        freqs = x * rearrange(self.weights, 'd -> 1 d') * 2 * math.pi
-        fouriered = torch.cat((freqs.sin(), freqs.cos()), dim = -1)
-        fouriered = torch.cat((x, fouriered), dim = -1)
-        return fouriered
 
 # building block modules
 
@@ -229,7 +180,23 @@ class Attention(nn.Module):
 
         out = rearrange(out, 'b h n d -> b (h d) n')
         return self.to_out(out)
+    
+# Helper function
+def default(val, d):
+    return val if val is not None else (d() if callable(d) else d)
 
+# Embedding for Cl and Cd
+class ClCdEmbedding(nn.Module):
+    def __init__(self, in_features, out_features):
+        super().__init__()
+        self.fc = nn.Linear(in_features, out_features)
+        self.activation = nn.GELU()
+
+    def forward(self, cl_cd):
+        print(f"Cl/Cd embedding input shape: {cl_cd.shape}")
+        return self.activation(self.fc(cl_cd))
+
+# Main U-Net Model
 class Unet1D(nn.Module):
     def __init__(
         self,
@@ -246,101 +213,89 @@ class Unet1D(nn.Module):
         learned_sinusoidal_dim = 16,
         sinusoidal_pos_emb_theta = 10000,
         attn_dim_head = 32,
-        attn_heads = 4
+        attn_heads = 4,
+        condition_features=256  # Number of features for Cl and Cd
     ):
         super().__init__()
 
         # determine dimensions
-
         self.channels = channels
         self.self_condition = self_condition
         input_channels = channels * (2 if self_condition else 1)
-
         init_dim = default(init_dim, dim)
-        self.init_conv = nn.Conv1d(input_channels, init_dim, 7, padding = 3)
+        self.init_conv = nn.Conv1d(input_channels + 1, init_dim, 7, padding=3)
 
+        # dimensions setup
         dims = [init_dim, *map(lambda m: dim * m, dim_mults)]
         in_out = list(zip(dims[:-1], dims[1:]))
 
-        block_klass = partial(ResnetBlock, groups = resnet_block_groups)
+        # blocks
+        block_klass = partial(ResnetBlock, groups=resnet_block_groups)
 
-        # time embeddings
+        # time and Cl/Cd embeddings
+        self.time_embedding = SinusoidalPosEmb(dim, sinusoidal_pos_emb_theta)
+        self.condition_embedding = ClCdEmbedding(condition_features, dim)  # condition embedding
+        self.combine_embeddings = nn.Linear(dim * 2, dim * 4)  # Combine time and Cl/Cd embeddings
 
-        time_dim = dim * 4
-
-        self.random_or_learned_sinusoidal_cond = learned_sinusoidal_cond or random_fourier_features
-
-        if self.random_or_learned_sinusoidal_cond:
-            sinu_pos_emb = RandomOrLearnedSinusoidalPosEmb(learned_sinusoidal_dim, random_fourier_features)
-            fourier_dim = learned_sinusoidal_dim + 1
-        else:
-            sinu_pos_emb = SinusoidalPosEmb(dim, theta = sinusoidal_pos_emb_theta)
-            fourier_dim = dim
-
-        self.time_mlp = nn.Sequential(
-            sinu_pos_emb,
-            nn.Linear(fourier_dim, time_dim),
-            nn.GELU(),
-            nn.Linear(time_dim, time_dim)
-        )
-
-        # layers
-
+        # layers setup
         self.downs = nn.ModuleList([])
         self.ups = nn.ModuleList([])
         num_resolutions = len(in_out)
 
         for ind, (dim_in, dim_out) in enumerate(in_out):
             is_last = ind >= (num_resolutions - 1)
-
             self.downs.append(nn.ModuleList([
-                block_klass(dim_in, dim_in, time_emb_dim = time_dim),
-                block_klass(dim_in, dim_in, time_emb_dim = time_dim),
+                block_klass(dim_in, dim_in),
+                block_klass(dim_in, dim_in),
                 Residual(PreNorm(dim_in, LinearAttention(dim_in))),
-                Downsample(dim_in, dim_out) if not is_last else nn.Conv1d(dim_in, dim_out, 3, padding = 1)
+                Downsample(dim_in, dim_out) if not is_last else nn.Conv1d(dim_in, dim_out, 3, padding=1)
             ]))
 
         mid_dim = dims[-1]
-        self.mid_block1 = block_klass(mid_dim, mid_dim, time_emb_dim = time_dim)
-        self.mid_attn = Residual(PreNorm(mid_dim, Attention(mid_dim, dim_head = attn_dim_head, heads = attn_heads)))
-        self.mid_block2 = block_klass(mid_dim, mid_dim, time_emb_dim = time_dim)
+        self.mid_block1 = block_klass(mid_dim, mid_dim)
+        self.mid_attn = Residual(PreNorm(mid_dim, Attention(mid_dim, dim_head=attn_dim_head, heads=attn_heads)))
+        self.mid_block2 = block_klass(mid_dim, mid_dim)
 
         for ind, (dim_in, dim_out) in enumerate(reversed(in_out)):
             is_last = ind == (len(in_out) - 1)
-
             self.ups.append(nn.ModuleList([
-                block_klass(dim_out + dim_in, dim_out, time_emb_dim = time_dim),
-                block_klass(dim_out + dim_in, dim_out, time_emb_dim = time_dim),
+                block_klass(dim_out + dim_in, dim_out),
+                block_klass(dim_out + dim_in, dim_out),
                 Residual(PreNorm(dim_out, LinearAttention(dim_out))),
-                Upsample(dim_out, dim_in) if not is_last else  nn.Conv1d(dim_out, dim_in, 3, padding = 1)
+                Upsample(dim_out, dim_in) if not is_last else nn.Conv1d(dim_out, dim_in, 3, padding=1)
             ]))
 
         default_out_dim = channels * (1 if not learned_variance else 2)
         self.out_dim = default(out_dim, default_out_dim)
+        self.final_res_block = block_klass(dim * 2, dim)
+        self.final_conv = nn.Conv1d(dim, self.out_dim - 1, 1)
 
-        self.final_res_block = block_klass(dim * 2, dim, time_emb_dim = time_dim)
-        self.final_conv = nn.Conv1d(dim, self.out_dim, 1)
-
-    def forward(self, x, time, x_self_cond = None):
+    def forward(self, x, time, condition, x_self_cond=None):
+        print(f"Forward received condition: {condition}")
+        assert condition is not None, 'Condition must be provided'
         if self.self_condition:
             x_self_cond = default(x_self_cond, lambda: torch.zeros_like(x))
-            x = torch.cat((x_self_cond, x), dim = 1)
-
+            x = torch.cat((x_self_cond, x), dim=1)
+        x = torch.cat((x, condition), dim=1)
         x = self.init_conv(x)
         r = x.clone()
 
-        t = self.time_mlp(time)
+        # Process time and Cl/Cd embeddings
+        time_emb = self.time_embedding(time)
+
+        assert condition is not None, 'Cl/Cd must be provided'
+        condition_emb = self.condition_embedding(condition.view(condition.shape[0], -1))
+        combined_emb = torch.cat((time_emb, condition_emb), dim=-1)
+        t = self.combine_embeddings(combined_emb)
 
         h = []
 
         for block1, block2, attn, downsample in self.downs:
             x = block1(x, t)
             h.append(x)
-
             x = block2(x, t)
             x = attn(x)
             h.append(x)
-
             x = downsample(x)
 
         x = self.mid_block1(x, t)
@@ -348,17 +303,20 @@ class Unet1D(nn.Module):
         x = self.mid_block2(x, t)
 
         for block1, block2, attn, upsample in self.ups:
-            tmp = h.pop()
-            x = torch.cat((x, tmp), dim = 1)
+            x = torch.cat((x, h.pop()), dim=1)
             x = block1(x, t)
-
-            x = torch.cat((x, h.pop()), dim = 1)
+            x = torch.cat((x, h.pop()), dim=1)
             x = block2(x, t)
             x = attn(x)
-
             x = upsample(x)
 
-        x = torch.cat((x, r), dim = 1)
-
+        x = torch.cat((x, r), dim=1)
         x = self.final_res_block(x, t)
         return self.final_conv(x)
+
+if __name__ == "__main__":
+    unet = Unet1D(    
+        dim=8,  # Adjust based on the complexity of your data
+        channels=1,  # y
+        dim_mults=(1, 2, 4, 8),
+        resnet_block_groups=1)

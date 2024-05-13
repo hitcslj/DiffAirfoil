@@ -8,10 +8,10 @@ import wandb
 from torch.utils.data import DataLoader
 from torchvision import datasets
 from tqdm import tqdm
-from dataload import AirFoilMixParsec
+from dataload import AirFoilDatasetParsec
 import numpy as np
 from models import script_utils,VAE
-from utils import Fit_airfoil,vis_airfoil2,de_norm
+from utils import Fit_airfoil,vis_airfoil2
 import os
 
 def get_datasets():
@@ -42,7 +42,6 @@ def main():
 
             run = wandb.init(
                     project=args.project_name,
-                    entity='treaptofun',
                     config=vars(args),
                     name=args.run_name,
                     )
@@ -65,12 +64,9 @@ def main():
 
             data = next(train_loader)  
 
-            gt = data['gt'] # (B, 257, 2)
-            gt = de_norm(gt,dtype='tensor')[:,:,1:2]  # (B, 257, 1)
-            
+            gt = data['gt'][:,:256,1:2].reshape(-1, 1, 256) # (B, 257, 2)
             y = data['params'] # (B, 11)
-            y2 = de_norm(data['keypoint'],dtype='tensor')[:,:,1:2] # (B, 26, 1)
-            y2 = y2.reshape(-1, 26)
+            y2 = data['keypoint'][:,:,1] # (B, 26)
   
             gt = gt.to(device) # (B, 257, 1)
             y = y.to(device) # (128, 11)
@@ -137,8 +133,8 @@ def create_argparser():
             log_to_wandb=False,
             log_rate=1000,
             checkpoint_rate=10000,
-            log_dir="weights/dit_y_new",
-            project_name='airfoil-dit-y-new',
+            log_dir="weights/dit_raw",
+            project_name='airfoil-dit-raw',
             run_name=run_name,
             start_iter=1,
             model_checkpoint=None,
@@ -146,6 +142,7 @@ def create_argparser():
             schedule_low=1e-4,
             schedule_high=0.02,
             device=device,
+            feature_size=256,
             )
     defaults.update(script_utils.diffusion_defaults())
 

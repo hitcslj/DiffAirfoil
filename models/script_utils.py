@@ -5,7 +5,9 @@ import torch.nn.functional as F
 from .diffusion import (
     PointDiTDiffusion,
 )
+from .diffusion_unet import PointUnetDiffusion
 from .dit import PointDiT
+from .Unet1D import Unet1D
 
 from .utils import generate_cosine_schedule,generate_linear_schedule
 
@@ -62,7 +64,7 @@ def diffusion_defaults():
         schedule="cosine",
         ema_decay=0.9999,
         ema_update_rate=1,
-        loss_type="l1",
+        loss_type="l2",
     )
 
     return defaults
@@ -79,30 +81,21 @@ def get_diffusion_from_args(args):
         )
     if "airfoil" in args.project_name:
         
-        model = PointDiT(
-            latent_size = 257,
-            input_channels = 1,#changed
-            hidden_size=256,
-            condition_size1=11,
-            condition_size2=26,#changed
-            )
-        '''
-        from .Unet1D import Unet1D
+        # model = PointDiT(
+        #     latent_size = args.feature_size,
+        #     input_channels = 1,
+        #     hidden_size=256,
+        #     condition_size1=11,
+        #     condition_size2=26,
+        #     )
         model = Unet1D(
-            dim=16,
-            init_dim=16,
-            out_dim=1,
+            dim=8,
             channels=1,
-            self_condition=False,
-            dim_mults=(1, 2, 4, 8), 
-            learned_variance = True,
-            learned_sinusoidal_cond = True,
-            random_fourier_features = True,
+            dim_mults=(1, 2, 4, 8),
+            resnet_block_groups=1
         )
-        '''
-        
-        diffusion = PointDiTDiffusion(
-            model, latent_size=257, channels=1,#changed
+        diffusion = PointUnetDiffusion(
+            model, latent_size=args.feature_size, channels=1,
             betas=betas,
             ema_decay=args.ema_decay,
             ema_update_rate=args.ema_update_rate,

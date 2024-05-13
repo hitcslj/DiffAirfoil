@@ -20,18 +20,20 @@ def get_data(txt_path):
 class AirFoilDatasetParsec(Dataset):
     """Dataset for shape datasets(coco & 机翼)"""
     def __init__(self,split = 'train',
-                 dataset_names = ['supercritical_airfoil'],
+                 dataset_names = None, #['interpolated_uiuc'],
                  ):
+        if dataset_names is None:
+            raise ValueError("The dataset_names should not be None.")
         self.split = split
         txt_list = []
         for dataset_name in dataset_names:
-            with open(f'data/airfoil/{dataset_name}_{split}.txt') as f:
-                  txt_list += [os.path.join(f'data/airfoil/{dataset_name}',line.rstrip().strip('\n') + '.dat',) 
+            with open(f'new_data/data/airfoil/{dataset_name}_{split}.txt') as f:
+                  txt_list += [os.path.join(f'new_data/data/airfoil/{dataset_name}',line.rstrip().strip('\n') + '.dat',) 
                               for line in f.readlines()]
         self.txt_list = txt_list
         params = {}
         for dataset_name in dataset_names:
-          with open(f'data/airfoil/parsec_params_direct_{dataset_name}.txt') as f:
+          with open(f'new_data/data/airfoil/parsec_params_direct_{dataset_name}.txt') as f:
               for line in f.readlines():
                   name_params = line.rstrip().strip('\n').split(',')
                   # 取出路径的最后一个文件名作为key

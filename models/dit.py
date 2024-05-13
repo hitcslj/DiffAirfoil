@@ -214,22 +214,22 @@ class PointDiT(nn.Module):
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
-    def forward(self, x, t, y,y2):
+    def forward(self, x, t, y):
         """
         Forward pass of DiT.
         x: (N, T, 1) tensor of spatial inputs (latent representations of point clouds)
         t: (N,) tensor of diffusion timesteps
         y: (N,) tensor of class labels
         """
-        x = self.x_embedder(x)+self.pos_embed   # (N, T, D)
+        x = self.x_embedder(x.permute(0,2,1))+self.pos_embed   # (N, T, D)
         t = self.t_embedder(t)                   # (N, D)
         y = self.y_embedder(y)    # (N, D)
-        y2 = self.y2_embedder(y2)
-        c = t + y + y2                              # (N, D)
+        # y2 = self.y2_embedder(y2)
+        c = t + y                              # (N, D)
         for block in self.blocks:
             x = block(x, c)                      # (N, T, D)
         x = self.final_layer(x, c)                # (N, T, 1)
-        return x
+        return x.permute(0,2,1)
 
     def forward_with_cfg(self, x, t, y, cfg_scale):
         """

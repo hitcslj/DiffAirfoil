@@ -74,7 +74,7 @@ def main():
             y = y.to(device) # (128, 11)
             y2 = y2.to(device) # (128, 52)
             
-            samples = diffusion.sample_ddim(batch_size=y.shape[0], device=device, y=y, y2=y2).to(device).reshape(y.shape[0], 257,2)
+            samples = diffusion.sample_ddim(batch_size=y.shape[0], device=device, y=y, y2=y2).to(device)
             samples = samples.cpu().numpy()
 
             ref_gt = de_norm(data['gt'].cpu().numpy())

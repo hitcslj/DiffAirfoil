@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import os
 from scipy.spatial.distance import pdist, squareform
-
+from sklearn.manifold import TSNE
 
 def norm(data,dtype='ndarray'):
     if dtype=='ndarray':
@@ -62,6 +62,86 @@ def vis_airfoil2(source,target,idx,dir_name='output_airfoil',sample_type='ddpm')
     # Clear the plot cache
     plt.clf()
 
+def vis_airfoils(airfoil_x, airfoil_y, epoch, dir_name='output_airfoil', title="Airfoil Plot"):
+    os.makedirs(dir_name,exist_ok=True)
+    idx = 0
+    fig, ax = plt.subplots(nrows=4, ncols=4, figsize=(15, 10))
+    fig.suptitle(title, fontsize=16)
+    for row in ax:
+        for col in row:
+            if idx >= len(airfoil_y):
+                col.axis('off')
+            else:
+                y_plot = airfoil_y[idx].numpy() if isinstance(airfoil_y[idx], torch.Tensor) else airfoil_y[idx]
+                col.scatter(airfoil_x, y_plot, s=0.6, c='black')
+                col.axis('off')
+                col.axis('equal')
+                idx += 1
+    file_path = f'{dir_name}/{epoch}.png'
+    plt.savefig(file_path, dpi=300, bbox_inches='tight', pad_inches=0.0)
+    plt.clf()
+
+
+def visualize_latent_space(vae, data_loader, device, epoch, dir_name='output_airfoil'):
+    os.makedirs(dir_name,exist_ok=True)
+    # Encode all data to get the latent vectors
+    mu_list = []
+    for data in data_loader:
+        data = data['gt'][:,:,1] # [b,257]
+        data = data.to(device)
+        with torch.no_grad():
+            mu, _ = vae.encode(data)
+            mu_list.append(mu)
+    
+    # Concatenate all mu vectors from batches and remove any extra dimensions
+    mu_tensor = torch.cat(mu_list, dim=0)
+    mu_tensor = mu_tensor.view(mu_tensor.size(0), -1)  # Ensure it's a 2D array
+    # Apply t-SNE to reduce dimensions to 2
+    tsne = TSNE(n_components=2, random_state=42)
+    mu_tsne = tsne.fit_transform(mu_tensor.cpu().numpy())  # Ensure tensor is on CPU
+
+    # Plot the results
+    plt.figure(figsize=(10, 6))
+    plt.scatter(mu_tsne[:, 0], mu_tsne[:, 1], alpha=0.5)
+    plt.title('Latent Space Visualization using t-SNE')
+    plt.xlabel('t-SNE Dimension 1')
+    plt.ylabel('t-SNE Dimension 2')
+    plt.grid(True)
+    file_path = f'{dir_name}/{epoch}.png'
+    plt.savefig(file_path, dpi=300, bbox_inches='tight', pad_inches=0.0)
+    plt.clf()
+
+
+def vis_traj(model, vae, val_dataset, log_dir, epoch, device="cuda:0"):
+    n_samples = 1
+    real_airfoils = torch.stack([val_dataset.__getitem__(i)['gt'][:,1] for i in range(n_samples)])
+    y1 = torch.stack([val_dataset.__getitem__(i)['params'] for i in range(n_samples)]).to(device) # n, 1, 11
+    y2 = torch.stack([val_dataset.__getitem__(i)['keypoint'][:,1] for i in range(n_samples)]).to(device)
+    sample, all_samples = model.sampling(n_samples, y1, y2, device=device)
+    all_samples = all_samples.squeeze()
+    print("sample shape: ", sample.shape)
+
+    gen_airfoils = vae.decode(all_samples).detach().cpu().numpy()
+    gt_x = val_dataset.__getitem__(0)['gt'][:,0:1].cpu().numpy()
+    print("generated_airfoils shape: ", gen_airfoils.shape)
+
+    vis_airfoils(gt_x, np.expand_dims(real_airfoils.cpu().numpy(), -1),f"{epoch}_Real",dir_name=log_dir,title="Real Airfoils")
+    vis_airfoils(gt_x, np.expand_dims(gen_airfoils, -1),f"{epoch}_Reconstructed",dir_name=log_dir,title="Traj of Airfoils")  
+
+def eval(model, vae, val_dataset, log_dir, epoch=0, n_samples=16, device="cuda:0"):
+    real_airfoils = torch.stack([val_dataset.__getitem__(i)['gt'][:,1] for i in range(n_samples)])
+    y1 = torch.stack([val_dataset.__getitem__(i)['params'] for i in range(n_samples)]).to(device) # n, 1, 11
+    y2 = torch.stack([val_dataset.__getitem__(i)['keypoint'][:,1] for i in range(n_samples)]).to(device)
+    sample, all_samples = model.sampling(n_samples, y1, y2, device=device)
+    sample = sample.squeeze()
+    print("sample shape: ", sample.shape)
+    
+    gen_airfoils = vae.decode(sample).detach().cpu().numpy()
+    gt_x = val_dataset.__getitem__(0)['gt'][:,0:1].cpu().numpy()
+    print("generated_airfoils shape: ", gen_airfoils.shape)
+
+    vis_airfoils(gt_x, np.expand_dims(real_airfoils.cpu().numpy(), -1),f"{epoch}_Real",dir_name=log_dir,title="Real Airfoils")
+    vis_airfoils(gt_x, np.expand_dims(gen_airfoils, -1),f"{epoch}_Reconstructed",dir_name=log_dir,title="Reconstructed Airfoils")
 
 def calculate_smoothness(airfoil):
     smoothness = 0.0
